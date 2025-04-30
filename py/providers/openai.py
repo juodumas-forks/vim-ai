@@ -50,22 +50,47 @@ class OpenAIProvider():
         response = self._openai_request(url, request, http_options)
 
         _choice_key = 'delta' if openai_options['stream'] else 'message'
+        should_parse_think_tag = True
+        expect_think_tag_close = False
 
         def _get_delta(resp):
             choices = resp.get('choices') or [{}]
             return choices[0].get(_choice_key, {})
 
+        def _parse_content_think_tag(content):
+            nonlocal should_parse_think_tag, expect_think_tag_close
+            if should_parse_think_tag:
+                if content.startswith('<think>'):
+                    expect_think_tag_close = True
+            if expect_think_tag_close:
+                try:
+                    idx = content.index('</think>') + 9
+                    expect_think_tag_close = False
+                except ValueError:
+                    idx = len(content)
+                return {'type': 'thinking', 'content': content[0:idx]}
+            if should_parse_think_tag:
+                should_parse_think_tag = False
+                content = content.lstrip('\n')
+            return {'type': 'assistant', 'content': content}
+
         def _map_chunk(resp):
+            nonlocal should_parse_think_tag
             self.utils.print_debug("openai: [{}] response: {}", self.command_type, resp)
             delta = _get_delta(resp)
             if delta.get('reasoning_content'):
                 # NOTE: support for deepseek's reasoning_content
+                should_parse_think_tag = False
                 return {'type': 'thinking', 'content': delta.get('reasoning_content')}
             if delta.get('reasoning'):
                 # NOTE: support for `reasoning` from openrouter
+                should_parse_think_tag = False
                 return {'type': 'thinking', 'content': delta.get('reasoning')}
-            if delta.get('content'):
-                return {'type': 'assistant', 'content': delta.get('content')}
+            content = delta.get('content')
+            if content:
+                if should_parse_think_tag:
+                    return _parse_content_think_tag(content)
+                return {'type': 'assistant', 'content': content}
             return None # invalid chunk, this occured in deepseek models
 
         def _filter_valid_chunks(chunk):
